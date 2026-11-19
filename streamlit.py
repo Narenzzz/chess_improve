@@ -1,4 +1,4 @@
-"""Streamlit front end for chess_coach.py. Deploy on Streamlit Community Cloud with these files in the repo root: streamlit_app.py (this file, set it as the app's main file) chess_coach.py requirements.txt (chess, streamlit) packages.txt (stockfish) """
+"""Streamlit front end for chess_coach.py. Deploy on Streamlit  Community Cloud with these files in the repo root: streamlit_app.py (this file, set it as the app's main file) chess_coach.py requirements.txt (chess, streamlit) packages.txt (stockfish) """
 import argparse
 import csv
 import datetime as dt
