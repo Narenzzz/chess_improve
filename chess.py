@@ -29,6 +29,16 @@ PGN_FILE = os.path.join(DATA_DIR, "games.pgn")
 CACHE_FILE = os.path.join(DATA_DIR, "analysis.json")
 LOG_FILE = os.path.join(DATA_DIR, "training_log.csv")
 
+
+def set_data_dir(path):
+    """Point all data files at another folder (used by the Streamlit app, one folder per user)."""
+    global DATA_DIR, PGN_FILE, CACHE_FILE, LOG_FILE
+    DATA_DIR = path
+    PGN_FILE = os.path.join(path, "games.pgn")
+    CACHE_FILE = os.path.join(path, "analysis.json")
+    LOG_FILE = os.path.join(path, "training_log.csv")
+    os.makedirs(path, exist_ok=True)
+
 # Thresholds in win-percentage points (0-100 scale, same model Lichess uses)
 INACCURACY, MISTAKE, BLUNDER = 5.0, 10.0, 15.0
 GAP_IMPORTANT, GAP_CRITICAL = 5.0, 10.0
@@ -89,7 +99,8 @@ def clock_state(clock_before, base):
 
 def find_stockfish(explicit):
     for cand in [explicit, os.environ.get("STOCKFISH"), shutil.which("stockfish"),
-                 shutil.which("stockfish.exe"), "./stockfish", "./stockfish.exe"]:
+                 shutil.which("stockfish.exe"), "/usr/games/stockfish", "/usr/bin/stockfish",
+                 "./stockfish", "./stockfish.exe"]:
         if cand and os.path.exists(cand):
             return cand
         if cand and shutil.which(cand):
@@ -232,13 +243,13 @@ def analyse_game(engine, game, user, limit):
     return rec
 
 
-def cmd_analyse(args):
+def cmd_analyse(args, progress=None):
     if not os.path.exists(PGN_FILE):
         sys.exit(f"No games found at {PGN_FILE}. Run the fetch command first.")
     cache = load_cache()
     sf = find_stockfish(args.stockfish)
     engine = chess.engine.SimpleEngine.popen_uci(sf)
-    engine.configure({"Threads": args.threads, "Hash": 256})
+    engine.configure({"Threads": args.threads, "Hash": getattr(args, "hash", 256)})
     limit = chess.engine.Limit(depth=args.depth)
 
     games = []
@@ -256,6 +267,8 @@ def cmd_analyse(args):
             rec = analyse_game(engine, g, args.user, limit)
             gid = game_id(g.headers)
             cache[gid] = rec if rec else {"skip": True}
+            if progress:
+                progress(i, len(todo))
             if i % 5 == 0 or i == len(todo):
                 save_cache(cache)
                 rate = (time.time() - t0) / i
@@ -572,6 +585,8 @@ def cmd_log(args):
     os.makedirs(DATA_DIR, exist_ok=True)
     if args.category not in LOG_CATEGORIES:
         sys.exit(f"Category must be one of: {', '.join(LOG_CATEGORIES)}")
+    if args.minutes <= 0:
+        sys.exit("Minutes must be a positive number")
     new = not os.path.exists(LOG_FILE)
     with open(LOG_FILE, "a", newline="", encoding="utf-8") as f:
         wr = csv.writer(f)
