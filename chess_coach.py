@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-""" chess_coach.py - a personal game analyser built around one question: "Am I spending my clock on the moves that actually matter?" It downloads your rated Lichess games (with clock times), runs Stockfish on every move you played, and measures how critical each position was: * normal - several good moves exist; play fast on general principles * important - one or two moves are clearly better; worth a real look * critical - only one move keeps the evaluation; this is where to think Then it produces: report.html dashboard: time vs criticality, mistakes by phase, by clock state, by opening, monthly trend, training log trainer.html "Critical or normal?" quiz built from YOUR positions puzzles_N.pgn your own mistakes as puzzles (import into a Lichess study) Commands python chess_coach.py fetch --user Narenzxy [--max 200] [--perf rapid,classical] python chess_coach.py analyse --user Narenzxy [--depth 14] [--stockfish PATH] python chess_coach.py report --user Narenzxy python chess_coach.py all --user Narenzxy (fetch + analyse + report) python chess_coach.py log calc 60 "Edouard ch.1, ex 1-6" Requires: Python 3.9+, `pip install chess`, and a Stockfish binary. """
+""" chess_coach.py - a personal game analyser built around one question: "Am I spending my clock on the moves that actually matter?" It downloads your rated Lichess games (with clock times), runs Stockfish on every move you played, and measures how critical each position was: * normal - several good moves exist; play fast on general principles * important - one or two moves are clearly better; worth a real look * critical - only one move keeps the evaluation; this is where to think Then it produces: report.html dashboard: time vs criticality, mistakes by phase, by clock state, by opening, monthly trend, training log trainer.html "Critical or normal?" quiz built from YOUR positions puzzles_N.pgn your own mistakes as puzzles (import into a Lichess study) Commands python chess_coach.py fetch --user Narenzxy [--max 200] [--perf rapid,classical] python chess_coach.py analyse --user Narenzxy [--depth 14] [--stockfish PATH] python chess_coach.py report --user Narenzxy python chess_coach.py all --user Narenzxy (fetch + analyse + report) python chess_coach.py theory --user Narenzxy --token lip_xxx (where you leave opening theory) python chess_coach.py log calc 60 "Edouard ch.1, ex 1-6" Requires: Python 3.9+, `pip install chess`, and a Stockfish binary. """
 
 import argparse
 import csv
@@ -13,6 +13,7 @@ import shutil
 import statistics
 import sys
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -240,6 +241,7 @@ def analyse_game(engine, game, user, limit):
                 last_own_clock = clk
         board.push(move)
         prev_move = move
+    rec["uci"] = [mv.uci() for mv in game.mainline_moves()]
     return rec
 
 
@@ -280,6 +282,236 @@ def cmd_analyse(args, progress=None):
         engine.quit()
 
 
+# --------------------------------------------------------------------------- opening theory
+EXPLORER_URL = "https://explorer.lichess.ovh/masters"
+MIN_MASTER_GAMES = 5     # a move counts as "theory" if masters played it at least this often
+MAX_THEORY_PLY = 40
+
+
+def theory_file():
+    return os.path.join(DATA_DIR, "theory.json")
+
+
+def explorer_cache_file():
+    return os.path.join(DATA_DIR, "explorer_cache.json")
+
+
+def load_json(path, default):
+    if os.path.exists(path):
+        try:
+            with open(path, encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return default
+
+
+def save_json(path, data):
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f)
+    os.replace(tmp, path)
+
+
+def game_uci_moves(g):
+    """Full move list of a game. Older analyses didn't store it, so rebuild it from the saved positions."""
+    if g.get("uci"):
+        return g["uci"]
+    board, seq = chess.Board(), []
+    for m in g["moves"]:
+        if m.get("last"):
+            try:
+                mv = chess.Move.from_uci(m["last"])
+            except ValueError:
+                break
+            if mv not in board.legal_moves:
+                break
+            board.push(mv)
+            seq.append(mv.uci())
+        if board.fen().split()[:2] != m["fen"].split()[:2]:
+            break
+        try:
+            mv = board.parse_san(m["san"])
+        except ValueError:
+            break
+        board.push(mv)
+        seq.append(mv.uci())
+    return seq
+
+
+class ExplorerError(Exception):
+    pass
+
+
+def explorer_query(fen, token, ecache, wait=None):
+    """Master-games statistics for one position (cached; Lichess asks for one request at a time)."""
+    key = " ".join(fen.split()[:4])
+    if key in ecache:
+        return ecache[key]
+    url = EXPLORER_URL + "?" + urllib.parse.urlencode({"fen": fen, "moves": 12, "topGames": 0})
+    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}", "Accept": "application/json",
+                                               "User-Agent": "chess_coach.py (personal training tool)"})
+    for attempt in range(4):
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            break
+        except urllib.error.HTTPError as e:
+            if e.code == 429 and attempt < 3:
+                if wait:
+                    wait()
+                time.sleep(61)   # Lichess asks clients to wait a full minute after a 429
+                continue
+            if e.code in (401, 403):
+                raise ExplorerError("Lichess rejected the token. Create a new one at "
+                                    "https://lichess.org/account/oauth/token (no permissions need ticking).")
+            raise ExplorerError(f"Opening explorer returned HTTP {e.code}. Try again later.")
+        except urllib.error.URLError as e:
+            raise ExplorerError(f"Could not reach the opening explorer: {e.reason}")
+    else:
+        raise ExplorerError("The opening explorer kept saying 'too many requests'. Try again in a few minutes.")
+    moves = []
+    for x in data.get("moves", []):
+        n = x.get("white", 0) + x.get("draws", 0) + x.get("black", 0)
+        moves.append({"uci": x["uci"], "san": x["san"], "n": n,
+                      "w": round(100 * (x.get("white", 0) + x.get("draws", 0) / 2) / n) if n else 50})
+    slim = {"total": data.get("white", 0) + data.get("draws", 0) + data.get("black", 0), "moves": moves,
+            "opening": (data.get("opening") or {}).get("name")}
+    ecache[key] = slim
+    return slim
+
+
+def theory_for_game(g, token, ecache, wait=None):
+    seq = game_uci_moves(g)
+    if not seq:
+        return {"skip": "custom start position"}
+    my_color = chess.WHITE if g["color"] == "white" else chess.BLACK
+    board = chess.Board()
+    exit_info, opening, plies = None, None, 0
+    for ply, uci in enumerate(seq[:MAX_THEORY_PLY], start=1):
+        pos = explorer_query(board.fen(), token, ecache, wait)
+        opening = pos.get("opening") or opening
+        move = chess.Move.from_uci(uci)
+        entry = next((x for x in pos["moves"] if x["uci"] == uci), None)
+        n_played = entry["n"] if entry else 0
+        if n_played < MIN_MASTER_GAMES:
+            stm_white = board.turn == chess.WHITE
+            exit_info = {
+                "ply": ply, "no": board.fullmove_number, "dots": "." if stm_white else "...",
+                "by": "you" if board.turn == my_color else "opponent", "san": board.san(move),
+                "n_played": n_played, "fen": board.fen(), "total": pos["total"],
+                "top": [{"san": x["san"], "n": x["n"], "score": x["w"] if stm_white else 100 - x["w"]}
+                        for x in pos["moves"][:3]],
+            }
+            break
+        board.push(move)
+        plies = ply
+    base = g["base"] or 1
+    exit_ply = exit_info["ply"] if exit_info else plies + 1
+    in_book = [m for m in g["moves"] if m["ply"] < exit_ply]
+    after = [m for m in g["moves"] if m["ply"] >= exit_ply][:5]
+    return {
+        "exit": exit_info, "book_plies": plies, "opening": opening or g.get("opening"),
+        "time_in_book_pct": round(100 * sum(m["spent"] or 0 for m in in_book) / base, 1),
+        "after5_time_pct": round(100 * sum(m["spent"] or 0 for m in after) / base, 1),
+        "after5_loss": round(sum(m["loss"] for m in after if m["crit"] != "forced"), 1),
+        "after5_errors": sum(m["tag"] in ("mistake", "blunder") for m in after),
+    }
+
+
+def cmd_theory(args, progress=None, wait=None):
+    token = getattr(args, "token", None) or os.environ.get("LICHESS_TOKEN")
+    if not token:
+        sys.exit("Checking opening theory needs a free Lichess token: log in to Lichess, open "
+                 "https://lichess.org/account/oauth/token , create a token (no boxes need ticking) and pass "
+                 "it with --token or the LICHESS_TOKEN environment variable.")
+    games = [g for g in load_cache().values() if not g.get("skip")]
+    theory = load_json(theory_file(), {})
+    ecache = load_json(explorer_cache_file(), {})
+    todo = [g for g in games if g["id"] not in theory]
+    print(f"Checking opening theory for {len(todo)} game(s) against the Lichess masters database ...")
+    try:
+        for i, g in enumerate(todo, 1):
+            theory[g["id"]] = theory_for_game(g, token, ecache, wait)
+            save_json(theory_file(), theory)
+            save_json(explorer_cache_file(), ecache)
+            if progress:
+                progress(i, len(todo))
+    except ExplorerError as e:
+        save_json(explorer_cache_file(), ecache)
+        sys.exit(str(e))
+    print(f"Theory checked for {sum(not t.get('skip') for t in theory.values())} games ({len(ecache)} positions cached).")
+
+
+def theory_section(games):
+    theory = load_json(theory_file(), {})
+    rows = [(g, theory[g["id"]]) for g in games if g["id"] in theory and not theory[g["id"]].get("skip")]
+    if not rows:
+        return ("<p class='muted'>Not checked yet. In the app tick <b>Check opening theory</b>, or run "
+                "<code>python chess_coach.py theory --user NAME --token YOUR_TOKEN</code>.</p>")
+
+    def mv(e):
+        return f"{e['no']}{e['dots']} {html.escape(e['san'])}"
+
+    def masters(e):
+        if not e["top"]:
+            return "<span class='muted'>no master games here</span>"
+        return ", ".join(f"<b>{html.escape(t['san'])}</b> <span class='muted'>({t['n']}, {t['score']}%)</span>"
+                         for t in e["top"])
+
+    def explorer_link(e, color):
+        fen = e["fen"].replace(" ", "_")
+        return f'<a href="https://lichess.org/analysis/standard/{fen}?color={color}" target="_blank">open</a>'
+
+    mine = [(g, t) for g, t in rows if t["exit"] and t["exit"]["by"] == "you"]
+    theirs = [(g, t) for g, t in rows if t["exit"] and t["exit"]["by"] == "opponent"]
+    avg = lambda xs: (sum(xs) / len(xs)) if xs else 0
+    summary = (f"<ul class='ins'><li>You left master theory first in <b>{len(mine)}</b> of {len(rows)} games, "
+               f"on average at move <b>{avg([t['exit']['no'] for _, t in mine]):.0f}</b>.</li>"
+               f"<li>Your opponent left first in <b>{len(theirs)}</b> games, on average at move "
+               f"<b>{avg([t['exit']['no'] for _, t in theirs]):.0f}</b>.</li>"
+               f"<li>Your first 5 moves after leaving theory used on average "
+               f"<b>{avg([t['after5_time_pct'] for _, t in rows if t['exit']]):.0f}%</b> of your base time, "
+               f"and <b>{sum(t['after5_errors'] for _, t in rows)}</b> of them were mistakes or blunders.</li></ul>")
+
+    # study list: positions where YOU left theory, grouped
+    groups = {}
+    for g, t in mine:
+        key = " ".join(t["exit"]["fen"].split()[:2])
+        groups.setdefault(key, []).append((g, t))
+    study = sorted(groups.values(), key=lambda gs: (-len(gs), -sum(t["after5_time_pct"] for _, t in gs)))
+    study_html = "".join(
+        f"<tr><td>{html.escape((gs[0][1]['opening'] or '?')[:60])}</td><td>{gs[0][0]['color']}</td>"
+        f"<td>{mv(gs[0][1]['exit'])} <span class='muted'>({gs[0][1]['exit']['n_played']} master games)</span></td>"
+        f"<td>{masters(gs[0][1]['exit'])}</td><td>{len(gs)}</td>"
+        f"<td>{avg([t['after5_time_pct'] for _, t in gs]):.0f}%</td><td>{explorer_link(gs[0][1]['exit'], gs[0][0]['color'])}</td></tr>"
+        for gs in study[:20]) or "<tr><td colspan='7'>None: you never left theory first.</td></tr>"
+
+    per_game = sorted(rows, key=lambda gt: gt[0]["date"], reverse=True)
+    game_html = ""
+    for g, t in per_game:
+        e = t["exit"]
+        if not e:
+            game_html += (f"<tr><td style='white-space:nowrap'>{g['date']}</td><td>{g['color']}</td><td>{html.escape((t['opening'] or '?')[:50])}</td>"
+                          f"<td colspan='3'>stayed in theory for all {t['book_plies']} checked moves</td>"
+                          f"<td>{t['time_in_book_pct']:.0f}%</td><td>-</td><td>-</td></tr>")
+            continue
+        who = "<b>you</b>" if e["by"] == "you" else "opponent"
+        game_html += (f"<tr><td style='white-space:nowrap'>{g['date']}</td><td>{g['color']}</td><td>{html.escape((t['opening'] or '?')[:50])}</td>"
+                      f"<td>{mv(e)}</td><td>{who}</td><td>{masters(e)}</td><td>{t['time_in_book_pct']:.0f}%</td>"
+                      f"<td>{t['after5_time_pct']:.0f}%</td><td>{t['after5_errors']}</td></tr>")
+    return (summary +
+            "<h3>Your study list: positions where you left theory</h3>"
+            "<p class='note'>Most frequent first. Open the position, look at the masters' moves in the explorer, play through "
+            "5 master games from there and write the plan in your own study.</p>"
+            "<table><tr><th>Opening</th><th>Colour</th><th>Where you left</th><th>Masters play (games, score)</th>"
+            "<th>Times</th><th>Clock used next 5 moves</th><th></th></tr>" + study_html + "</table>"
+            "<h3>Every game</h3>"
+            "<table><tr><th>Date</th><th>Colour</th><th>Opening</th><th>Left theory</th><th>By</th>"
+            "<th>Masters play</th><th>Clock used in theory</th><th>Clock next 5 moves</th><th>Errors next 5</th></tr>"
+            + game_html + "</table>")
+
+
 # --------------------------------------------------------------------------- report helpers
 def pct(a, b):
     return 100.0 * a / b if b else 0.0
@@ -295,7 +527,7 @@ def fmt_s(sec):
 def move_link(g, m):
     if "lichess.org" not in g["url"]:
         return html.escape(f"{m['no']}. {m['san']}")
-    return (f'<a href="{g["url"]}/{g["color"]}#{m["ply"] - 1}" target="_blank">'
+    return (f'<a href="https://lichess.org/{g["id"]}/{g["color"]}#{m["ply"] - 1}" target="_blank">'
             f'{m["no"]}{"." if g["color"] == "white" else "..."} {html.escape(m["san"])}</a>')
 
 
@@ -501,6 +733,7 @@ def cmd_report(args):
         "{{INSIGHTS}}": "".join(f"<li>{i}</li>" for i in insights), "{{CRIT}}": crit_html,
         "{{OVER}}": over_html, "{{RUSH}}": rush_html, "{{PHASE}}": err_table(phase_rows),
         "{{CLOCK}}": err_table(clock_rows), "{{OPEN}}": op_html, "{{TREND}}": trend_html, "{{LOG}}": log_html,
+        "{{THEORY}}": theory_section(games),
     }.items():
         page = page.replace(k, str(v))
     out = os.path.join(DATA_DIR, "report.html")
@@ -536,7 +769,7 @@ def write_trainer(games, user, n_items=60):
             "svg": board_svg(m, g["color"]), "answer": m["crit"], "best": m["best"], "line": m["line"],
             "played": m["san"], "loss": m["loss"], "spent": fmt_s(m["spent"]), "tag": m["tag"] or "fine",
             "toMove": g["color"], "game": f"{g['date']} vs {g['opponent']}",
-            "url": f"{g['url']}/{g['color']}#{m['ply'] - 1}" if "lichess.org" in g["url"] else "",
+            "url": f"https://lichess.org/{g['id']}/{g['color']}#{m['ply'] - 1}" if "lichess.org" in g["url"] else "",
         })
     page = TRAINER_TEMPLATE.replace("{{DATA}}", json.dumps(items)).replace("{{USER}}", html.escape(user))
     out = os.path.join(DATA_DIR, "trainer.html")
@@ -600,7 +833,7 @@ def cmd_log(args):
 
 
 # --------------------------------------------------------------------------- templates
-REPORT_TEMPLATE = """<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"> <meta name="viewport" content="width=device-width,initial-scale=1"><title>Chess report - {{USER}}</title> <style> :root{--bg:#f7f6f3;--fg:#1d1d1b;--muted:#6b6a66;--card:#fff;--line:#e4e2dc;--acc:#2f6f4f;--bad:#b4452f} @media (prefers-color-scheme:dark){:root{--bg:#161615;--fg:#ecebe7;--muted:#9a9993;--card:#201f1d;--line:#34332f;--acc:#6fbf94;--bad:#e07a62}} *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.5 system-ui,-apple-system,Segoe UI,sans-serif} main{max-width:1080px;margin:0 auto;padding:32px 20px 64px}h1{font-size:26px;margin:0}h2{font-size:18px;margin:40px 0 6px} .muted,.sub{color:var(--muted)}.sub{font-size:12.5px}p.lead{color:var(--muted);margin:4px 0 0} .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin-top:24px} .card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px 16px} .lbl{font-size:12.5px;color:var(--muted)}.val{font-size:26px;font-weight:650;font-variant-numeric:tabular-nums} table{width:100%;border-collapse:collapse;background:var(--card);border:1px solid var(--line);border-radius:10px;overflow:hidden;font-size:14px} th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line);vertical-align:middle;font-variant-numeric:tabular-nums} th{font-weight:600;font-size:12.5px;color:var(--muted)}tr:last-child td{border-bottom:none} .bar{height:6px;background:var(--line);border-radius:3px;margin-top:4px;min-width:60px}.bar span{display:block;height:100%;background:var(--acc);border-radius:3px} .bar.bad span{background:var(--bad)}a{color:var(--acc)}code{background:var(--line);padding:1px 5px;border-radius:4px} ul.ins{background:var(--card);border:1px solid var(--line);border-left:4px solid var(--acc);border-radius:10px;padding:14px 18px 14px 34px;margin:10px 0 14px} ul.ins li{margin:4px 0}.note{font-size:13px;color:var(--muted);margin:6px 0 10px} </style></head><body><main> <h1>Chess report: {{USER}}</h1><p class="lead">Generated {{GENERATED}} &middot; speeds: {{SPEEDS}}</p> <div class="cards">{{CARDS}}</div> <h2>1. Where your clock goes</h2> <p class="note">Each of your moves after move 12 is classed by how much the best move beat the second best: <b>normal</b> (under 5% winning chances, several moves are fine), <b>important</b> (5&ndash;10%), <b>critical</b> (10%+, essentially one right move).</p> <ul class="ins">{{INSIGHTS}}</ul> <table><tr><th>Position type</th><th>Moves</th><th>Avg think</th><th>Median</th><th>Share of your time</th><th>Mistake + blunder rate</th></tr>{{CRIT}}</table> <h2>2. Overthinking: long thinks in normal positions</h2> <p class="note">Positions where several moves were fine, but you spent a big part of your clock. Open them and ask: what told me this was critical, and what should have told me it wasn't?</p> <table><tr><th>Move</th><th>Date</th><th>Time spent</th><th>Share</th><th>Clock before</th><th>Engine move</th></tr>{{OVER}}</table> <h2>3. Rushed critical moments that cost you</h2> <p class="note">Critical or important positions where you moved quickly and made a mistake or blunder. These are the moments your time was meant for.</p> <table><tr><th>Move</th><th>Date</th><th>Type</th><th>Time spent</th><th>Result</th><th>Win% lost</th><th>Best line</th></tr>{{RUSH}}</table> <h2>4. Mistakes by game phase</h2> <p class="note">Rates are per 100 moves.</p> <table><tr><th>Phase</th><th>Moves</th><th>Accuracy</th><th>Inaccuracies</th><th>Mistakes</th><th>Blunders</th></tr>{{PHASE}}</table> <h2>5. Mistakes by clock state</h2> <p class="note">Plenty: over a third of your base time left. Low: 10&ndash;33%. Time trouble: under 10%.</p> <table><tr><th>Clock</th><th>Moves</th><th>Accuracy</th><th>Inaccuracies</th><th>Mistakes</th><th>Blunders</th></tr>{{CLOCK}}</table> <h2>6. Openings</h2> <p class="note">Opening time = share of your base time used in moves 1&ndash;12. High numbers mean you are thinking in positions you should know.</p> <table><tr><th>Colour</th><th>Opening</th><th>Games</th><th>Score</th><th>Avg loss / move (moves 1&ndash;12)</th><th>Opening time</th></tr>{{OPEN}}</table> <h2>7. Monthly trend</h2> <p class="note">Signs of progress: accuracy up, blunders down, fewer time-trouble games, and a higher critical/normal thinking ratio.</p> <table><tr><th>Month</th><th>Games</th><th>Accuracy</th><th>Blunders / game</th><th>Time-trouble games</th><th>Critical / normal think ratio</th></tr>{{TREND}}</table> <h2>8. Training log</h2> {{LOG}} </main></body></html>"""
+REPORT_TEMPLATE = """<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"> <meta name="viewport" content="width=device-width,initial-scale=1"><title>Chess report - {{USER}}</title> <style> :root{--bg:#f7f6f3;--fg:#1d1d1b;--muted:#6b6a66;--card:#fff;--line:#e4e2dc;--acc:#2f6f4f;--bad:#b4452f} @media (prefers-color-scheme:dark){:root{--bg:#161615;--fg:#ecebe7;--muted:#9a9993;--card:#201f1d;--line:#34332f;--acc:#6fbf94;--bad:#e07a62}} *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.5 system-ui,-apple-system,Segoe UI,sans-serif} main{max-width:1080px;margin:0 auto;padding:32px 20px 64px}h1{font-size:26px;margin:0}h2{font-size:18px;margin:40px 0 6px}h3{font-size:15px;margin:22px 0 6px} .muted,.sub{color:var(--muted)}.sub{font-size:12.5px}p.lead{color:var(--muted);margin:4px 0 0} .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin-top:24px} .card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px 16px} .lbl{font-size:12.5px;color:var(--muted)}.val{font-size:26px;font-weight:650;font-variant-numeric:tabular-nums} table{width:100%;border-collapse:collapse;background:var(--card);border:1px solid var(--line);border-radius:10px;overflow:hidden;font-size:14px} th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line);vertical-align:middle;font-variant-numeric:tabular-nums} th{font-weight:600;font-size:12.5px;color:var(--muted)}tr:last-child td{border-bottom:none} .bar{height:6px;background:var(--line);border-radius:3px;margin-top:4px;min-width:60px}.bar span{display:block;height:100%;background:var(--acc);border-radius:3px} .bar.bad span{background:var(--bad)}a{color:var(--acc)}code{background:var(--line);padding:1px 5px;border-radius:4px} ul.ins{background:var(--card);border:1px solid var(--line);border-left:4px solid var(--acc);border-radius:10px;padding:14px 18px 14px 34px;margin:10px 0 14px} ul.ins li{margin:4px 0}.note{font-size:13px;color:var(--muted);margin:6px 0 10px} </style></head><body><main> <h1>Chess report: {{USER}}</h1><p class="lead">Generated {{GENERATED}} &middot; speeds: {{SPEEDS}}</p> <div class="cards">{{CARDS}}</div> <h2>1. Where your clock goes</h2> <p class="note">Each of your moves after move 12 is classed by how much the best move beat the second best: <b>normal</b> (under 5% winning chances, several moves are fine), <b>important</b> (5&ndash;10%), <b>critical</b> (10%+, essentially one right move).</p> <ul class="ins">{{INSIGHTS}}</ul> <table><tr><th>Position type</th><th>Moves</th><th>Avg think</th><th>Median</th><th>Share of your time</th><th>Mistake + blunder rate</th></tr>{{CRIT}}</table> <h2>2. Overthinking: long thinks in normal positions</h2> <p class="note">Positions where several moves were fine, but you spent a big part of your clock. Open them and ask: what told me this was critical, and what should have told me it wasn't?</p> <table><tr><th>Move</th><th>Date</th><th>Time spent</th><th>Share</th><th>Clock before</th><th>Engine move</th></tr>{{OVER}}</table> <h2>3. Rushed critical moments that cost you</h2> <p class="note">Critical or important positions where you moved quickly and made a mistake or blunder. These are the moments your time was meant for.</p> <table><tr><th>Move</th><th>Date</th><th>Type</th><th>Time spent</th><th>Result</th><th>Win% lost</th><th>Best line</th></tr>{{RUSH}}</table> <h2>4. Mistakes by game phase</h2> <p class="note">Rates are per 100 moves.</p> <table><tr><th>Phase</th><th>Moves</th><th>Accuracy</th><th>Inaccuracies</th><th>Mistakes</th><th>Blunders</th></tr>{{PHASE}}</table> <h2>5. Mistakes by clock state</h2> <p class="note">Plenty: over a third of your base time left. Low: 10&ndash;33%. Time trouble: under 10%.</p> <table><tr><th>Clock</th><th>Moves</th><th>Accuracy</th><th>Inaccuracies</th><th>Mistakes</th><th>Blunders</th></tr>{{CLOCK}}</table> <h2>6. Openings</h2> <p class="note">Opening time = share of your base time used in moves 1&ndash;12. High numbers mean you are thinking in positions you should know.</p> <table><tr><th>Colour</th><th>Opening</th><th>Games</th><th>Score</th><th>Avg loss / move (moves 1&ndash;12)</th><th>Opening time</th></tr>{{OPEN}}</table> <h2>7. Monthly trend</h2> <p class="note">Signs of progress: accuracy up, blunders down, fewer time-trouble games, and a higher critical/normal thinking ratio.</p> <table><tr><th>Month</th><th>Games</th><th>Accuracy</th><th>Blunders / game</th><th>Time-trouble games</th><th>Critical / normal think ratio</th></tr>{{TREND}}</table> <h2>8. Where you leave opening theory</h2> <p class="note">Theory = moves played at least 5 times in the Lichess masters database (over-the-board games of 2200+ FIDE players).</p> {{THEORY}} <h2>9. Training log</h2> {{LOG}} </main></body></html>"""
 
 TRAINER_TEMPLATE = """<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"> <meta name="viewport" content="width=device-width,initial-scale=1"><title>Critical or normal? - {{USER}}</title> <style> :root{--bg:#f7f6f3;--fg:#1d1d1b;--muted:#6b6a66;--card:#fff;--line:#e4e2dc;--acc:#2f6f4f;--bad:#b4452f} @media (prefers-color-scheme:dark){:root{--bg:#161615;--fg:#ecebe7;--muted:#9a9993;--card:#201f1d;--line:#34332f;--acc:#6fbf94;--bad:#e07a62}} body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.5 system-ui,-apple-system,Segoe UI,sans-serif} main{max-width:820px;margin:0 auto;padding:28px 18px 60px}h1{font-size:22px;margin:0 0 4px}.muted{color:var(--muted)} .wrap{display:flex;gap:22px;flex-wrap:wrap;margin-top:18px}.board svg{width:380px;max-width:92vw;height:auto;border-radius:6px} .side{flex:1;min-width:250px}.btns{display:flex;gap:10px;margin:14px 0} button{font:inherit;padding:10px 16px;border-radius:8px;border:1px solid var(--line);background:var(--card);color:var(--fg);cursor:pointer} button.primary{background:var(--acc);color:#fff;border-color:var(--acc)}button:disabled{opacity:.45;cursor:default} .timer{font-size:28px;font-weight:650;font-variant-numeric:tabular-nums}.res{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px 14px;display:none} .ok{color:var(--acc);font-weight:650}.no{color:var(--bad);font-weight:650}a{color:var(--acc)} </style></head><body><main> <h1>Critical or normal?</h1> <p class="muted">Positions from your own games. You have 10 seconds per position: decide whether it needs deep calculation (critical) or can be played on principles (normal). Train the judgement, not the move.</p> <div class="wrap"><div class="board" id="board"></div> <div class="side"><div class="muted" id="meta"></div><div class="timer" id="timer">10</div> <div class="btns"><button id="bc">Critical: calculate</button><button id="bn">Normal: play fast</button></div> <div class="res" id="res"></div> <div class="btns"><button class="primary" id="next" disabled>Next position</button></div> <div class="muted" id="score"></div></div></div> </main><script> const D={{DATA}};let i=0,right=0,done=0,t=10,tick=null,answered=false; const $=id=>document.getElementById(id); function show(){if(i>=D.length){$('board').innerHTML='';$('meta').textContent='';$('timer').textContent=''; $('res').style.display='block';$('res').innerHTML='<b>Finished.</b> '+right+' / '+done+' correct. Reload to go again.'; $('bc').disabled=$('bn').disabled=$('next').disabled=true;return;} const p=D[i];answered=false;$('board').innerHTML=p.svg;$('meta').textContent=(p.toMove==='white'?'White':'Black')+' to move · '+p.game+' · '+(i+1)+'/'+D.length; $('res').style.display='none';$('bc').disabled=$('bn').disabled=false;$('next').disabled=true;t=10;$('timer').textContent=t; clearInterval(tick);tick=setInterval(()=>{t--;$('timer').textContent=Math.max(t,0);if(t<=0){answer(null)}},1000);} function answer(g){if(answered)return;answered=true;clearInterval(tick);const p=D[i];const truth=p.answer==='critical'?'critical':'normal'; const ok=g===truth;done++;if(ok)right++; $('res').style.display='block'; $('res').innerHTML=(g===null?'<span class="no">Time up.</span> ':ok?'<span class="ok">Correct.</span> ':'<span class="no">Not quite.</span> ')+ 'This position was <b>'+truth+'</b>.<br>Engine: <b>'+p.best+'</b> &nbsp;<span class="muted">'+p.line+'</span><br>'+ 'In the game you played <b>'+p.played+'</b> after '+p.spent+' ('+p.tag+(p.loss>=5?', -'+p.loss.toFixed(0)+'%':'')+').'+ (p.url?' <a href="'+p.url+'" target="_blank">Open game</a>':''); $('bc').disabled=$('bn').disabled=true;$('next').disabled=false;$('score').textContent='Score: '+right+' / '+done;} $('bc').onclick=()=>answer('critical');$('bn').onclick=()=>answer('normal');$('next').onclick=()=>{i++;show()};show(); </script></body></html>"""
 
@@ -632,6 +865,9 @@ def main():
     p = sub.add_parser("report"); common(p)
     p.add_argument("--speeds", default="rapid,classical", help="which speeds to include")
 
+    p = sub.add_parser("theory"); common(p)
+    p.add_argument("--token", default=None, help="Lichess personal token (or set LICHESS_TOKEN)")
+
     p = sub.add_parser("log")
     p.add_argument("category", help="/".join(LOG_CATEGORIES))
     p.add_argument("minutes", type=int)
@@ -645,11 +881,15 @@ def main():
         cmd_analyse(args)
     elif args.cmd == "report":
         cmd_report(args)
+    elif args.cmd == "theory":
+        cmd_theory(args)
     elif args.cmd == "log":
         cmd_log(args)
     elif args.cmd == "all":
         cmd_fetch(args)
         cmd_analyse(args)
+        if args.token or os.environ.get("LICHESS_TOKEN"):
+            cmd_theory(args)
         cmd_report(args)
 
 
