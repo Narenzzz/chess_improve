@@ -60,6 +60,20 @@ with st.sidebar:
     st.caption("First run: roughly 2–6 seconds per game on the free server. "
                "Keep this tab open while it runs.")
 
+    st.divider()
+    st.subheader("Opening theory")
+    try:
+        secret_token = st.secrets.get("LICHESS_TOKEN", "")
+    except Exception:
+        secret_token = ""
+    token = secret_token or st.text_input(
+        "Lichess token", type="password",
+        help="Free. Create it at lichess.org/account/oauth/token without ticking any boxes. "
+             "To avoid pasting it every time, add LICHESS_TOKEN to the app's Secrets.")
+    if secret_token:
+        st.caption("Token loaded from app secrets.")
+    theory_go = st.button("Check where I leave theory", width="stretch", disabled=not token)
+
 if not user:
     st.info("Enter your Lichess username in the sidebar.")
     st.stop()
@@ -104,10 +118,39 @@ if go:
             st.stop()
         status.update(label="Done", state="complete", expanded=False)
 
+# ------------------------------------------------------------------ opening theory
+if theory_go:
+    if not os.path.exists(cc.CACHE_FILE):
+        st.sidebar.error("Analyse your games first.")
+    else:
+        with st.status("Checking your openings against the masters database…", expanded=True) as status:
+            bar = st.progress(0.0, text="Starting…")
+            note = st.empty()
+
+            def tprogress(i, total):
+                bar.progress(i / total, text=f"Game {i} of {total}")
+
+            def twait():
+                note.info("Lichess asked us to slow down, waiting one minute before continuing…")
+
+            try:
+                cc.cmd_theory(argparse.Namespace(user=user, token=token), progress=tprogress, wait=twait)
+            except SystemExit as e:
+                status.update(label="Theory check stopped", state="error")
+                st.error(str(e))
+                st.stop()
+            note.empty()
+            err = run_report(user, speeds)
+            if err:
+                st.warning(err)
+            status.update(label="Opening theory checked: see section 8 of the report", state="complete",
+                          expanded=False)
+
 # rebuild the report if analysis exists but the speeds changed or the report is missing
-if os.path.exists(cc.CACHE_FILE) and not go:
+if os.path.exists(cc.CACHE_FILE) and not go and not theory_go:
     key = (user, tuple(sorted(speeds)), os.path.getmtime(cc.CACHE_FILE),
-           os.path.getmtime(cc.LOG_FILE) if os.path.exists(cc.LOG_FILE) else 0)
+           os.path.getmtime(cc.LOG_FILE) if os.path.exists(cc.LOG_FILE) else 0,
+           os.path.getmtime(cc.theory_file()) if os.path.exists(cc.theory_file()) else 0)
     if st.session_state.get("report_key") != key:
         err = run_report(user, speeds)
         if err:
@@ -168,22 +211,33 @@ with tab_l:
 with tab_b:
     st.markdown("Free Streamlit apps lose their files when they restart or sleep. "
                 "Download these each Sunday and upload them here if your data disappears.")
-    c1, c2 = st.columns(2)
+    c1, c2, c3 = st.columns(3)
+    if os.path.exists(cc.theory_file()):
+        c3.download_button("Download theory.json", read(cc.theory_file()), file_name=f"theory_{user}.json",
+                           mime="application/json")
     if os.path.exists(cc.CACHE_FILE):
         c1.download_button("Download analysis.json", read(cc.CACHE_FILE), file_name=f"analysis_{user}.json",
                            mime="application/json")
     if os.path.exists(cc.LOG_FILE):
         c2.download_button("Download training_log.csv", read(cc.LOG_FILE), file_name=f"training_log_{user}.csv",
                            mime="text/csv")
-    up = st.file_uploader("Restore a backup (analysis .json or training log .csv)", type=["json", "csv"])
+    up = st.file_uploader("Restore a backup (analysis .json, theory .json or training log .csv)",
+                          type=["json", "csv"])
     if up is not None and st.button("Restore"):
         data = up.getvalue().decode("utf-8")
         if up.name.endswith(".json"):
             incoming = json.loads(data)
-            cache = cc.load_cache()
-            cache.update(incoming)
-            cc.save_cache(cache)
-            st.success(f"Restored {len(incoming)} analysed games.")
+            sample = next(iter(incoming.values()), {}) if incoming else {}
+            if "book_plies" in sample or "exit" in sample or sample.get("skip") == "custom start position":
+                theory = cc.load_json(cc.theory_file(), {})
+                theory.update(incoming)
+                cc.save_json(cc.theory_file(), theory)
+                st.success(f"Restored opening theory for {len(incoming)} games.")
+            else:
+                cache = cc.load_cache()
+                cache.update(incoming)
+                cc.save_cache(cache)
+                st.success(f"Restored {len(incoming)} analysed games.")
         else:
             rows = list(csv.DictReader(io.StringIO(data)))
             if not rows or "category" not in rows[0]:
