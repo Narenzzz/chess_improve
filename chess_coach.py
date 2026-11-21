@@ -1,5 +1,30 @@
 #!/usr/bin/env python3
-""" chess_coach.py - a personal game analyser built around one question: "Am I spending my clock on the moves that actually matter?" It downloads your rated Lichess games (with clock times), runs Stockfish on every move you played, and measures how critical each position was: * normal - several good moves exist; play fast on general principles * important - one or two moves are clearly better; worth a real look * critical - only one move keeps the evaluation; this is where to think Then it produces: report.html dashboard: time vs criticality, mistakes by phase, by clock state, by opening, monthly trend, training log trainer.html "Critical or normal?" quiz built from YOUR positions puzzles_N.pgn your own mistakes as puzzles (import into a Lichess study) Commands python chess_coach.py fetch --user Narenzxy [--max 200] [--perf rapid,classical] python chess_coach.py analyse --user Narenzxy [--depth 14] [--stockfish PATH] python chess_coach.py report --user Narenzxy python chess_coach.py all --user Narenzxy (fetch + analyse + report) python chess_coach.py theory --user Narenzxy --token lip_xxx (where you leave opening theory) python chess_coach.py log calc 60 "Edouard ch.1, ex 1-6" Requires: Python 3.9+, `pip install chess`, and a Stockfish binary. """
+"""
+chess_coach.py - a personal game analyser built around one question:
+    "Am I spending my clock on the moves that actually matter?"
+
+It downloads your rated Lichess games (with clock times), runs Stockfish on
+every move you played, and measures how critical each position was:
+    * normal    - several good moves exist; play fast on general principles
+    * important - one or two moves are clearly better; worth a real look
+    * critical  - only one move keeps the evaluation; this is where to think
+
+Then it produces:
+    report.html        dashboard: time vs criticality, mistakes by phase,
+                       by clock state, by opening, monthly trend, training log
+    trainer.html       "Critical or normal?" quiz built from YOUR positions
+    puzzles_N.pgn      your own mistakes as puzzles (import into a Lichess study)
+
+Commands
+    python chess_coach.py fetch   --user Narenzxy [--max 200] [--perf rapid,classical]
+    python chess_coach.py analyse --user Narenzxy [--depth 14] [--stockfish PATH]
+    python chess_coach.py report  --user Narenzxy
+    python chess_coach.py all     --user Narenzxy          (fetch + analyse + report)
+    python chess_coach.py theory  --user Narenzxy --token lip_xxx   (where you leave opening theory)
+    python chess_coach.py log calc 60 "Edouard ch.1, ex 1-6"
+
+Requires: Python 3.9+, `pip install chess`, and a Stockfish binary.
+"""
 
 import argparse
 import csv
@@ -23,7 +48,9 @@ try:
     import chess.pgn
     import chess.svg
 except ImportError:
-    sys.exit("python-chess is missing. Install it with: pip install chess")
+    sys.exit("python-chess is missing. Install it with:  pip install chess")
+
+__version__ = "2026-11-21c"
 
 DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "coach_data")
 PGN_FILE = os.path.join(DATA_DIR, "games.pgn")
@@ -274,7 +301,7 @@ def cmd_analyse(args, progress=None):
             if i % 5 == 0 or i == len(todo):
                 save_cache(cache)
                 rate = (time.time() - t0) / i
-                print(f" {i}/{len(todo)} done (~{rate * (len(todo) - i) / 60:.1f} min left)")
+                print(f"  {i}/{len(todo)} done  (~{rate * (len(todo) - i) / 60:.1f} min left)")
     except KeyboardInterrupt:
         print("\nInterrupted - progress saved, run analyse again to continue.")
     finally:
@@ -580,7 +607,7 @@ def cmd_report(args):
     time_losses = sum(g["outcome"] == "loss" and "time" in g["termination"].lower() for g in games)
 
     cards = [
-        ("Games", f"{n}", f"+{w} ={d} -{l} ({pct(w + d / 2, n):.0f}%)"),
+        ("Games", f"{n}", f"+{w} ={d} -{l}  ({pct(w + d / 2, n):.0f}%)"),
         ("Accuracy", f"{acc:.1f}", "average per move (Lichess formula)"),
         ("Blunders / game", f"{ec['blunder'] / n:.2f}", f"mistakes / game {ec['mistake'] / n:.2f}"),
         ("Reached time trouble", f"{pct(tt_games, n):.0f}%", "of games (under 10% of base time)"),
@@ -739,7 +766,7 @@ def cmd_report(args):
     out = os.path.join(DATA_DIR, "report.html")
     with open(out, "w", encoding="utf-8") as f:
         f.write(page)
-    print(f"Report: {out}")
+    print(f"Report:  {out}")
 
     write_trainer(games, args.user)
     write_puzzles(games)
@@ -775,7 +802,7 @@ def write_trainer(games, user, n_items=60):
     out = os.path.join(DATA_DIR, "trainer.html")
     with open(out, "w", encoding="utf-8") as f:
         f.write(page)
-    print(f"Trainer: {out} ({len(items)} positions)")
+    print(f"Trainer: {out}  ({len(items)} positions)")
 
 
 def write_puzzles(games, chunk=64):
@@ -833,9 +860,106 @@ def cmd_log(args):
 
 
 # --------------------------------------------------------------------------- templates
-REPORT_TEMPLATE = """<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"> <meta name="viewport" content="width=device-width,initial-scale=1"><title>Chess report - {{USER}}</title> <style> :root{--bg:#f7f6f3;--fg:#1d1d1b;--muted:#6b6a66;--card:#fff;--line:#e4e2dc;--acc:#2f6f4f;--bad:#b4452f} @media (prefers-color-scheme:dark){:root{--bg:#161615;--fg:#ecebe7;--muted:#9a9993;--card:#201f1d;--line:#34332f;--acc:#6fbf94;--bad:#e07a62}} *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.5 system-ui,-apple-system,Segoe UI,sans-serif} main{max-width:1080px;margin:0 auto;padding:32px 20px 64px}h1{font-size:26px;margin:0}h2{font-size:18px;margin:40px 0 6px}h3{font-size:15px;margin:22px 0 6px} .muted,.sub{color:var(--muted)}.sub{font-size:12.5px}p.lead{color:var(--muted);margin:4px 0 0} .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin-top:24px} .card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px 16px} .lbl{font-size:12.5px;color:var(--muted)}.val{font-size:26px;font-weight:650;font-variant-numeric:tabular-nums} table{width:100%;border-collapse:collapse;background:var(--card);border:1px solid var(--line);border-radius:10px;overflow:hidden;font-size:14px} th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line);vertical-align:middle;font-variant-numeric:tabular-nums} th{font-weight:600;font-size:12.5px;color:var(--muted)}tr:last-child td{border-bottom:none} .bar{height:6px;background:var(--line);border-radius:3px;margin-top:4px;min-width:60px}.bar span{display:block;height:100%;background:var(--acc);border-radius:3px} .bar.bad span{background:var(--bad)}a{color:var(--acc)}code{background:var(--line);padding:1px 5px;border-radius:4px} ul.ins{background:var(--card);border:1px solid var(--line);border-left:4px solid var(--acc);border-radius:10px;padding:14px 18px 14px 34px;margin:10px 0 14px} ul.ins li{margin:4px 0}.note{font-size:13px;color:var(--muted);margin:6px 0 10px} </style></head><body><main> <h1>Chess report: {{USER}}</h1><p class="lead">Generated {{GENERATED}} &middot; speeds: {{SPEEDS}}</p> <div class="cards">{{CARDS}}</div> <h2>1. Where your clock goes</h2> <p class="note">Each of your moves after move 12 is classed by how much the best move beat the second best: <b>normal</b> (under 5% winning chances, several moves are fine), <b>important</b> (5&ndash;10%), <b>critical</b> (10%+, essentially one right move).</p> <ul class="ins">{{INSIGHTS}}</ul> <table><tr><th>Position type</th><th>Moves</th><th>Avg think</th><th>Median</th><th>Share of your time</th><th>Mistake + blunder rate</th></tr>{{CRIT}}</table> <h2>2. Overthinking: long thinks in normal positions</h2> <p class="note">Positions where several moves were fine, but you spent a big part of your clock. Open them and ask: what told me this was critical, and what should have told me it wasn't?</p> <table><tr><th>Move</th><th>Date</th><th>Time spent</th><th>Share</th><th>Clock before</th><th>Engine move</th></tr>{{OVER}}</table> <h2>3. Rushed critical moments that cost you</h2> <p class="note">Critical or important positions where you moved quickly and made a mistake or blunder. These are the moments your time was meant for.</p> <table><tr><th>Move</th><th>Date</th><th>Type</th><th>Time spent</th><th>Result</th><th>Win% lost</th><th>Best line</th></tr>{{RUSH}}</table> <h2>4. Mistakes by game phase</h2> <p class="note">Rates are per 100 moves.</p> <table><tr><th>Phase</th><th>Moves</th><th>Accuracy</th><th>Inaccuracies</th><th>Mistakes</th><th>Blunders</th></tr>{{PHASE}}</table> <h2>5. Mistakes by clock state</h2> <p class="note">Plenty: over a third of your base time left. Low: 10&ndash;33%. Time trouble: under 10%.</p> <table><tr><th>Clock</th><th>Moves</th><th>Accuracy</th><th>Inaccuracies</th><th>Mistakes</th><th>Blunders</th></tr>{{CLOCK}}</table> <h2>6. Openings</h2> <p class="note">Opening time = share of your base time used in moves 1&ndash;12. High numbers mean you are thinking in positions you should know.</p> <table><tr><th>Colour</th><th>Opening</th><th>Games</th><th>Score</th><th>Avg loss / move (moves 1&ndash;12)</th><th>Opening time</th></tr>{{OPEN}}</table> <h2>7. Monthly trend</h2> <p class="note">Signs of progress: accuracy up, blunders down, fewer time-trouble games, and a higher critical/normal thinking ratio.</p> <table><tr><th>Month</th><th>Games</th><th>Accuracy</th><th>Blunders / game</th><th>Time-trouble games</th><th>Critical / normal think ratio</th></tr>{{TREND}}</table> <h2>8. Where you leave opening theory</h2> <p class="note">Theory = moves played at least 5 times in the Lichess masters database (over-the-board games of 2200+ FIDE players).</p> {{THEORY}} <h2>9. Training log</h2> {{LOG}} </main></body></html>"""
+REPORT_TEMPLATE = """<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>Chess report - {{USER}}</title>
+<style>
+:root{--bg:#f7f6f3;--fg:#1d1d1b;--muted:#6b6a66;--card:#fff;--line:#e4e2dc;--acc:#2f6f4f;--bad:#b4452f}
+@media (prefers-color-scheme:dark){:root{--bg:#161615;--fg:#ecebe7;--muted:#9a9993;--card:#201f1d;--line:#34332f;--acc:#6fbf94;--bad:#e07a62}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.5 system-ui,-apple-system,Segoe UI,sans-serif}
+main{max-width:1080px;margin:0 auto;padding:32px 20px 64px}h1{font-size:26px;margin:0}h2{font-size:18px;margin:40px 0 6px}h3{font-size:15px;margin:22px 0 6px}
+.muted,.sub{color:var(--muted)}.sub{font-size:12.5px}p.lead{color:var(--muted);margin:4px 0 0}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin-top:24px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px 16px}
+.lbl{font-size:12.5px;color:var(--muted)}.val{font-size:26px;font-weight:650;font-variant-numeric:tabular-nums}
+table{width:100%;border-collapse:collapse;background:var(--card);border:1px solid var(--line);border-radius:10px;overflow:hidden;font-size:14px}
+th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line);vertical-align:middle;font-variant-numeric:tabular-nums}
+th{font-weight:600;font-size:12.5px;color:var(--muted)}tr:last-child td{border-bottom:none}
+.bar{height:6px;background:var(--line);border-radius:3px;margin-top:4px;min-width:60px}.bar span{display:block;height:100%;background:var(--acc);border-radius:3px}
+.bar.bad span{background:var(--bad)}a{color:var(--acc)}code{background:var(--line);padding:1px 5px;border-radius:4px}
+ul.ins{background:var(--card);border:1px solid var(--line);border-left:4px solid var(--acc);border-radius:10px;padding:14px 18px 14px 34px;margin:10px 0 14px}
+ul.ins li{margin:4px 0}.note{font-size:13px;color:var(--muted);margin:6px 0 10px}
+</style></head><body><main>
+<h1>Chess report: {{USER}}</h1><p class="lead">Generated {{GENERATED}} &middot; speeds: {{SPEEDS}}</p>
+<div class="cards">{{CARDS}}</div>
 
-TRAINER_TEMPLATE = """<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"> <meta name="viewport" content="width=device-width,initial-scale=1"><title>Critical or normal? - {{USER}}</title> <style> :root{--bg:#f7f6f3;--fg:#1d1d1b;--muted:#6b6a66;--card:#fff;--line:#e4e2dc;--acc:#2f6f4f;--bad:#b4452f} @media (prefers-color-scheme:dark){:root{--bg:#161615;--fg:#ecebe7;--muted:#9a9993;--card:#201f1d;--line:#34332f;--acc:#6fbf94;--bad:#e07a62}} body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.5 system-ui,-apple-system,Segoe UI,sans-serif} main{max-width:820px;margin:0 auto;padding:28px 18px 60px}h1{font-size:22px;margin:0 0 4px}.muted{color:var(--muted)} .wrap{display:flex;gap:22px;flex-wrap:wrap;margin-top:18px}.board svg{width:380px;max-width:92vw;height:auto;border-radius:6px} .side{flex:1;min-width:250px}.btns{display:flex;gap:10px;margin:14px 0} button{font:inherit;padding:10px 16px;border-radius:8px;border:1px solid var(--line);background:var(--card);color:var(--fg);cursor:pointer} button.primary{background:var(--acc);color:#fff;border-color:var(--acc)}button:disabled{opacity:.45;cursor:default} .timer{font-size:28px;font-weight:650;font-variant-numeric:tabular-nums}.res{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px 14px;display:none} .ok{color:var(--acc);font-weight:650}.no{color:var(--bad);font-weight:650}a{color:var(--acc)} </style></head><body><main> <h1>Critical or normal?</h1> <p class="muted">Positions from your own games. You have 10 seconds per position: decide whether it needs deep calculation (critical) or can be played on principles (normal). Train the judgement, not the move.</p> <div class="wrap"><div class="board" id="board"></div> <div class="side"><div class="muted" id="meta"></div><div class="timer" id="timer">10</div> <div class="btns"><button id="bc">Critical: calculate</button><button id="bn">Normal: play fast</button></div> <div class="res" id="res"></div> <div class="btns"><button class="primary" id="next" disabled>Next position</button></div> <div class="muted" id="score"></div></div></div> </main><script> const D={{DATA}};let i=0,right=0,done=0,t=10,tick=null,answered=false; const $=id=>document.getElementById(id); function show(){if(i>=D.length){$('board').innerHTML='';$('meta').textContent='';$('timer').textContent=''; $('res').style.display='block';$('res').innerHTML='<b>Finished.</b> '+right+' / '+done+' correct. Reload to go again.'; $('bc').disabled=$('bn').disabled=$('next').disabled=true;return;} const p=D[i];answered=false;$('board').innerHTML=p.svg;$('meta').textContent=(p.toMove==='white'?'White':'Black')+' to move · '+p.game+' · '+(i+1)+'/'+D.length; $('res').style.display='none';$('bc').disabled=$('bn').disabled=false;$('next').disabled=true;t=10;$('timer').textContent=t; clearInterval(tick);tick=setInterval(()=>{t--;$('timer').textContent=Math.max(t,0);if(t<=0){answer(null)}},1000);} function answer(g){if(answered)return;answered=true;clearInterval(tick);const p=D[i];const truth=p.answer==='critical'?'critical':'normal'; const ok=g===truth;done++;if(ok)right++; $('res').style.display='block'; $('res').innerHTML=(g===null?'<span class="no">Time up.</span> ':ok?'<span class="ok">Correct.</span> ':'<span class="no">Not quite.</span> ')+ 'This position was <b>'+truth+'</b>.<br>Engine: <b>'+p.best+'</b> &nbsp;<span class="muted">'+p.line+'</span><br>'+ 'In the game you played <b>'+p.played+'</b> after '+p.spent+' ('+p.tag+(p.loss>=5?', -'+p.loss.toFixed(0)+'%':'')+').'+ (p.url?' <a href="'+p.url+'" target="_blank">Open game</a>':''); $('bc').disabled=$('bn').disabled=true;$('next').disabled=false;$('score').textContent='Score: '+right+' / '+done;} $('bc').onclick=()=>answer('critical');$('bn').onclick=()=>answer('normal');$('next').onclick=()=>{i++;show()};show(); </script></body></html>"""
+<h2>1. Where your clock goes</h2>
+<p class="note">Each of your moves after move 12 is classed by how much the best move beat the second best: <b>normal</b> (under 5% winning chances, several moves are fine), <b>important</b> (5&ndash;10%), <b>critical</b> (10%+, essentially one right move).</p>
+<ul class="ins">{{INSIGHTS}}</ul>
+<table><tr><th>Position type</th><th>Moves</th><th>Avg think</th><th>Median</th><th>Share of your time</th><th>Mistake + blunder rate</th></tr>{{CRIT}}</table>
+
+<h2>2. Overthinking: long thinks in normal positions</h2>
+<p class="note">Positions where several moves were fine, but you spent a big part of your clock. Open them and ask: what told me this was critical, and what should have told me it wasn't?</p>
+<table><tr><th>Move</th><th>Date</th><th>Time spent</th><th>Share</th><th>Clock before</th><th>Engine move</th></tr>{{OVER}}</table>
+
+<h2>3. Rushed critical moments that cost you</h2>
+<p class="note">Critical or important positions where you moved quickly and made a mistake or blunder. These are the moments your time was meant for.</p>
+<table><tr><th>Move</th><th>Date</th><th>Type</th><th>Time spent</th><th>Result</th><th>Win% lost</th><th>Best line</th></tr>{{RUSH}}</table>
+
+<h2>4. Mistakes by game phase</h2>
+<p class="note">Rates are per 100 moves.</p>
+<table><tr><th>Phase</th><th>Moves</th><th>Accuracy</th><th>Inaccuracies</th><th>Mistakes</th><th>Blunders</th></tr>{{PHASE}}</table>
+
+<h2>5. Mistakes by clock state</h2>
+<p class="note">Plenty: over a third of your base time left. Low: 10&ndash;33%. Time trouble: under 10%.</p>
+<table><tr><th>Clock</th><th>Moves</th><th>Accuracy</th><th>Inaccuracies</th><th>Mistakes</th><th>Blunders</th></tr>{{CLOCK}}</table>
+
+<h2>6. Openings</h2>
+<p class="note">Opening time = share of your base time used in moves 1&ndash;12. High numbers mean you are thinking in positions you should know.</p>
+<table><tr><th>Colour</th><th>Opening</th><th>Games</th><th>Score</th><th>Avg loss / move (moves 1&ndash;12)</th><th>Opening time</th></tr>{{OPEN}}</table>
+
+<h2>7. Monthly trend</h2>
+<p class="note">Signs of progress: accuracy up, blunders down, fewer time-trouble games, and a higher critical/normal thinking ratio.</p>
+<table><tr><th>Month</th><th>Games</th><th>Accuracy</th><th>Blunders / game</th><th>Time-trouble games</th><th>Critical / normal think ratio</th></tr>{{TREND}}</table>
+
+<h2>8. Where you leave opening theory</h2>
+<p class="note">Theory = moves played at least 5 times in the Lichess masters database (over-the-board games of 2200+ FIDE players).</p>
+{{THEORY}}
+
+<h2>9. Training log</h2>
+{{LOG}}
+</main></body></html>"""
+
+TRAINER_TEMPLATE = """<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>Critical or normal? - {{USER}}</title>
+<style>
+:root{--bg:#f7f6f3;--fg:#1d1d1b;--muted:#6b6a66;--card:#fff;--line:#e4e2dc;--acc:#2f6f4f;--bad:#b4452f}
+@media (prefers-color-scheme:dark){:root{--bg:#161615;--fg:#ecebe7;--muted:#9a9993;--card:#201f1d;--line:#34332f;--acc:#6fbf94;--bad:#e07a62}}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.5 system-ui,-apple-system,Segoe UI,sans-serif}
+main{max-width:820px;margin:0 auto;padding:28px 18px 60px}h1{font-size:22px;margin:0 0 4px}.muted{color:var(--muted)}
+.wrap{display:flex;gap:22px;flex-wrap:wrap;margin-top:18px}.board svg{width:380px;max-width:92vw;height:auto;border-radius:6px}
+.side{flex:1;min-width:250px}.btns{display:flex;gap:10px;margin:14px 0}
+button{font:inherit;padding:10px 16px;border-radius:8px;border:1px solid var(--line);background:var(--card);color:var(--fg);cursor:pointer}
+button.primary{background:var(--acc);color:#fff;border-color:var(--acc)}button:disabled{opacity:.45;cursor:default}
+.timer{font-size:28px;font-weight:650;font-variant-numeric:tabular-nums}.res{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px 14px;display:none}
+.ok{color:var(--acc);font-weight:650}.no{color:var(--bad);font-weight:650}a{color:var(--acc)}
+</style></head><body><main>
+<h1>Critical or normal?</h1>
+<p class="muted">Positions from your own games. You have 10 seconds per position: decide whether it needs deep calculation (critical) or can be played on principles (normal). Train the judgement, not the move.</p>
+<div class="wrap"><div class="board" id="board"></div>
+<div class="side"><div class="muted" id="meta"></div><div class="timer" id="timer">10</div>
+<div class="btns"><button id="bc">Critical: calculate</button><button id="bn">Normal: play fast</button></div>
+<div class="res" id="res"></div>
+<div class="btns"><button class="primary" id="next" disabled>Next position</button></div>
+<div class="muted" id="score"></div></div></div>
+</main><script>
+const D={{DATA}};let i=0,right=0,done=0,t=10,tick=null,answered=false;
+const $=id=>document.getElementById(id);
+function show(){if(i>=D.length){$('board').innerHTML='';$('meta').textContent='';$('timer').textContent='';
+ $('res').style.display='block';$('res').innerHTML='<b>Finished.</b> '+right+' / '+done+' correct. Reload to go again.';
+ $('bc').disabled=$('bn').disabled=$('next').disabled=true;return;}
+ const p=D[i];answered=false;$('board').innerHTML=p.svg;$('meta').textContent=(p.toMove==='white'?'White':'Black')+' to move · '+p.game+' · '+(i+1)+'/'+D.length;
+ $('res').style.display='none';$('bc').disabled=$('bn').disabled=false;$('next').disabled=true;t=10;$('timer').textContent=t;
+ clearInterval(tick);tick=setInterval(()=>{t--;$('timer').textContent=Math.max(t,0);if(t<=0){answer(null)}},1000);}
+function answer(g){if(answered)return;answered=true;clearInterval(tick);const p=D[i];const truth=p.answer==='critical'?'critical':'normal';
+ const ok=g===truth;done++;if(ok)right++;
+ $('res').style.display='block';
+ $('res').innerHTML=(g===null?'<span class="no">Time up.</span> ':ok?'<span class="ok">Correct.</span> ':'<span class="no">Not quite.</span> ')+
+ 'This position was <b>'+truth+'</b>.<br>Engine: <b>'+p.best+'</b> &nbsp;<span class="muted">'+p.line+'</span><br>'+
+ 'In the game you played <b>'+p.played+'</b> after '+p.spent+' ('+p.tag+(p.loss>=5?', -'+p.loss.toFixed(0)+'%':'')+').'+
+ (p.url?' <a href="'+p.url+'" target="_blank">Open game</a>':'');
+ $('bc').disabled=$('bn').disabled=true;$('next').disabled=false;$('score').textContent='Score: '+right+' / '+done;}
+$('bc').onclick=()=>answer('critical');$('bn').onclick=()=>answer('normal');$('next').onclick=()=>{i++;show()};show();
+</script></body></html>"""
 
 
 # --------------------------------------------------------------------------- main

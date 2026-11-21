@@ -1,4 +1,12 @@
-"""Streamlit front end for chess_coach.py. Deploy on Streamlit Community Cloud with these files in the repo root: streamlit_app.py (this file, set it as the app's main file) chess_coach.py annotator.py requirements.txt (chess, streamlit) packages.txt (stockfish) """
+"""Streamlit front end for chess_coach.py.
+
+Deploy on Streamlit Community Cloud with these files in the repo root:
+    streamlit_app.py   (this file, set it as the app's main file)
+    chess_coach.py
+    annotator.py
+    requirements.txt   (chess, streamlit)
+    packages.txt       (stockfish)
+"""
 import argparse
 import csv
 import datetime as dt
@@ -9,8 +17,15 @@ import re
 
 import streamlit as st
 
-import annotator as an
+import importlib
+
 import chess_coach as cc
+import annotator as an
+
+# Always use the files currently on disk (Streamlit keeps imported files in memory otherwise).
+cc = importlib.reload(cc)
+an = importlib.reload(an)
+APP_VERSION = "2026-11-21c"
 
 st.set_page_config(page_title="Chess Coach", page_icon="♟", layout="wide")
 
@@ -81,6 +96,11 @@ with st.sidebar:
     if secret_token:
         st.caption("Token loaded from app secrets.")
     theory_go = st.button("Check where I leave theory", width="stretch", disabled=not token)
+
+    st.divider()
+    _ok = getattr(an, "__version__", "?") == APP_VERSION == getattr(cc, "__version__", "?")
+    st.caption(f"App version {APP_VERSION} · annotator {getattr(an, '__version__', 'old')} · "
+               f"core {getattr(cc, '__version__', 'old')}" + ("" if _ok else " ⚠️ files don't match: re-upload all files"))
 
 if not user:
     st.info("Enter your Lichess username in the sidebar.")
@@ -177,6 +197,10 @@ tab_a, tab_r, tab_t, tab_p, tab_l, tab_b = st.tabs(
 ICON = {"blunder": "🔴", "mistake": "🟠", "inaccuracy": "🟡"}
 
 with tab_a:
+    if not _ok:
+        st.error("Your app files are from different versions. Upload all files from the latest zip "
+                 "(Add file → Upload files) and reboot the app.")
+    st.caption(f"Version {APP_VERSION}")
     ai_key = secret("GEMINI_API_KEY") or secret("AI_API_KEY")
     ai_cfg = {"provider": secret("AI_PROVIDER", "gemini"), "key": ai_key,
               "model": secret("AI_MODEL") or None, "base_url": secret("AI_BASE_URL") or None}

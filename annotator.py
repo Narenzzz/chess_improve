@@ -1,4 +1,10 @@
-"""annotator.py - coach-style annotation of a single game. Stockfish supplies every fact (evaluations, best moves, lines, refutations, critical moments). An optional AI model (Gemini free tier by default) turns those facts into coach explanations. Every move the AI mentions is checked against the engine's facts; sentences that mention a move the engine never produced are removed. Without an AI key you still get engine-based notes. """
+"""annotator.py - coach-style annotation of a single game.
+
+Stockfish supplies every fact (evaluations, best moves, lines, refutations, critical moments).
+An optional AI model (Gemini free tier by default) turns those facts into coach explanations.
+Every move the AI mentions is checked against the engine's facts; sentences that mention a move
+the engine never produced are removed. Without an AI key you still get engine-based notes.
+"""
 import base64
 import io
 import json
@@ -16,6 +22,8 @@ import chess.svg
 
 from chess_coach import (BLUNDER, GAP_CRITICAL, GAP_IMPORTANT, INACCURACY, MISTAKE, find_stockfish,
                          move_accuracy, parse_tc, win_pct)
+
+__version__ = "2026-11-21c"
 
 MAX_MOMENTS = 14
 LINE_PLIES = 8
@@ -223,7 +231,23 @@ def move_label(p):
 
 
 # ----------------------------------------------------------------------------- AI prompt
-SYSTEM_RULES = """You are an experienced chess coach writing annotations for your student, a club player rated about 2000. You receive engine-verified FACTS about one game. Write explanations a coach would give: the idea, the plan, the threat, the weakness, the tactic, and a short practical rule the student can reuse. STRICT RULES 1. Every evaluation and every move you mention must come from the FACTS. Never invent moves or variations. You may only mention moves that appear in the game or in the lines given for that moment. 2. Do not contradict the evaluations. If the engine says a move lost, it lost. 3. Address the student as "you". Be direct and concrete, 1-3 sentences per note, no filler, no praise inflation. 4. Prefer the "why" over listing moves: which piece, which square, which plan, what the opponent threatened. 5. If time-spent data is given, mention it only when it teaches something (long think in a quiet position, or a fast move in a critical position). 6. Output ONLY valid JSON with exactly this shape: {"summary": "3-4 sentences telling the story of the game", "lessons": ["rule 1 tied to a move", "rule 2", "rule 3"], "notes": [{"id": "<moment id exactly as given>", "text": "<your note>"}]} Write one note for every moment id given, in the same order."""
+SYSTEM_RULES = """You are an experienced chess coach writing annotations for your student, a club player rated about 2000.
+You receive engine-verified FACTS about one game. Write explanations a coach would give: the idea, the plan, the threat,
+the weakness, the tactic, and a short practical rule the student can reuse.
+
+STRICT RULES
+1. Every evaluation and every move you mention must come from the FACTS. Never invent moves or variations.
+   You may only mention moves that appear in the game or in the lines given for that moment.
+2. Do not contradict the evaluations. If the engine says a move lost, it lost.
+3. Address the student as "you". Be direct and concrete, 1-3 sentences per note, no filler, no praise inflation.
+4. Prefer the "why" over listing moves: which piece, which square, which plan, what the opponent threatened.
+5. If time-spent data is given, mention it only when it teaches something (long think in a quiet position,
+   or a fast move in a critical position).
+6. Output ONLY valid JSON with exactly this shape:
+{"summary": "3-4 sentences telling the story of the game",
+ "lessons": ["rule 1 tied to a move", "rule 2", "rule 3"],
+ "notes": [{"id": "<moment id exactly as given>", "text": "<your note>"}]}
+Write one note for every moment id given, in the same order."""
 
 
 def build_prompt(game, my_color, facts, moments):
@@ -244,22 +268,22 @@ def build_prompt(game, my_color, facts, moments):
         w, b = p["material"]
         parts = [
             f"- id {p['id']}: {move_label(p)} ({'student' if p['mine'] else 'opponent'} move) - {p['kind']}.",
-            f" Position type: {p['crit']} (best move is {p['gap']:.0f} winning-% points better than the second best).",
-            f" Eval with best play {fmt_eval(p['eval_best'])}, after the move played {fmt_eval(p['eval_after'])} "
+            f"  Position type: {p['crit']} (best move is {p['gap']:.0f} winning-% points better than the second best).",
+            f"  Eval with best play {fmt_eval(p['eval_best'])}, after the move played {fmt_eval(p['eval_after'])} "
             f"(winning chances lost: {p['loss']:.0f}%).",
-            f" Engine best move {p['best_san']}; best line: {p['best_line']}.",
+            f"  Engine best move {p['best_san']}; best line: {p['best_line']}.",
         ]
         if p["second"] and p["second"] != p["best_san"]:
-            parts.append(f" Second-best move: {p['second']}.")
+            parts.append(f"  Second-best move: {p['second']}.")
         if p["refutation"]:
-            parts.append(f" Engine's best continuation after the move played: {p['refutation']}.")
-        parts.append(f" Material before the move: White {w}, Black {b} (pawn=1, minor=3, rook=5, queen=9).")
+            parts.append(f"  Engine's best continuation after the move played: {p['refutation']}.")
+        parts.append(f"  Material before the move: White {w}, Black {b} (pawn=1, minor=3, rook=5, queen=9).")
         if p["pinned_after"]:
-            parts.append(f" Pinned after the move: {', '.join(p['pinned_after'])}.")
+            parts.append(f"  Pinned after the move: {', '.join(p['pinned_after'])}.")
         if p["hanging_after"]:
-            parts.append(f" Undefended and attacked after the move: {', '.join(p['hanging_after'])}.")
+            parts.append(f"  Undefended and attacked after the move: {', '.join(p['hanging_after'])}.")
         if p["spent"] is not None:
-            parts.append(f" Time spent on this move: {fmt_time(p['spent'])}; clock left: {fmt_time(p['clock'])}.")
+            parts.append(f"  Time spent on this move: {fmt_time(p['spent'])}; clock left: {fmt_time(p['clock'])}.")
         lines += parts
     return "\n".join(lines)
 
