@@ -4,6 +4,7 @@ import io
 import json
 import math
 import re
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -16,7 +17,7 @@ import chess.svg
 from chess_coach import (BLUNDER, GAP_CRITICAL, GAP_IMPORTANT, INACCURACY, MISTAKE, find_stockfish,
                          move_accuracy, parse_tc, win_pct)
 
-MAX_MOMENTS = 18
+MAX_MOMENTS = 14
 LINE_PLIES = 8
 
 
@@ -271,6 +272,16 @@ class AIError(Exception):
 _GEMINI_MODEL_CACHE = {}
 
 
+def _http_error(e):
+    body = e.read().decode("utf-8", "ignore")[:400]
+    if e.code == 429:
+        return AIError("The AI's free quota is used up for now (HTTP 429). Engine notes were used instead; "
+                       "try 'Write AI notes again' later.")
+    if e.code in (401, 403):
+        return AIError(f"The AI key was rejected (HTTP {e.code}). Check the key in your app's Secrets.")
+    return AIError(f"AI request failed (HTTP {e.code}): {body}")
+
+
 def _http_json(url, payload=None, headers=None, timeout=120):
     data = json.dumps(payload).encode("utf-8") if payload is not None else None
     req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json", **(headers or {})})
@@ -278,14 +289,61 @@ def _http_json(url, payload=None, headers=None, timeout=120):
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return json.loads(r.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
-        body = e.read().decode("utf-8", "ignore")[:300]
-        if e.code == 429:
-            raise AIError("The AI's free quota is used up for now (HTTP 429). Try again later; engine notes were used instead.")
-        if e.code in (401, 403):
-            raise AIError(f"The AI key was rejected (HTTP {e.code}). Check the key in your app's Secrets.")
-        raise AIError(f"AI request failed (HTTP {e.code}): {body}")
+        raise _http_error(e)
     except urllib.error.URLError as e:
         raise AIError(f"Couldn't reach the AI service: {e.reason}")
+    except (TimeoutError, OSError) as e:
+        raise AIError(f"The AI took too long to answer ({type(e).__name__}). Engine notes were used instead; "
+                      "try 'Write AI notes again'.")
+    except ValueError:
+        raise AIError("The AI service sent an unreadable reply.")
+
+
+def _gemini_stream(name, payload, key, read_timeout=150, total_limit=300):
+    """Streamed generateContent: text arrives in pieces, so long answers don't hit a read timeout."""
+    url = f"https://generativelanguage.googleapis.com/v1beta/{name}:streamGenerateContent?alt=sse"
+    req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"),
+                                 headers={"Content-Type": "application/json", "x-goog-api-key": key})
+    chunks, start = [], time.monotonic()
+    try:
+        with urllib.request.urlopen(req, timeout=read_timeout) as r:
+            for raw in r:
+                if time.monotonic() - start > total_limit:
+                    raise AIError("The AI took more than 5 minutes. Engine notes were used instead.")
+                line = raw.decode("utf-8", "ignore").strip()
+                if not line.startswith("data:"):
+                    continue
+                try:
+                    obj = json.loads(line[5:].strip())
+                except ValueError:
+                    continue
+                block = (obj.get("promptFeedback") or {}).get("blockReason")
+                if block:
+                    raise AIError(f"Gemini refused the request ({block}).")
+                for cand in obj.get("candidates", []):
+                    for part in (cand.get("content") or {}).get("parts", []):
+                        if part.get("text") and not part.get("thought"):
+                            chunks.append(part["text"])
+    except urllib.error.HTTPError as e:
+        raise _http_error(e)
+    except urllib.error.URLError as e:
+        raise AIError(f"Couldn't reach the AI service: {e.reason}")
+    except (TimeoutError, OSError) as e:
+        raise AIError(f"The AI took too long to answer ({type(e).__name__}). Engine notes were used instead; "
+                      "try 'Write AI notes again', or set a faster model with AI_MODEL in Secrets.")
+    text = "".join(chunks)
+    if not text.strip():
+        raise AIError("Gemini returned an empty answer. Try again.")
+    return text
+
+
+def _thinking_config(name):
+    low = name.lower()
+    if "gemini-2.5" in low:
+        return {"thinkingBudget": 1024}
+    if re.search(r"gemini-[3-9]", low):
+        return {"thinkingLevel": "low"}
+    return None
 
 
 def pick_gemini_model(key):
@@ -320,15 +378,21 @@ def call_ai(prompt, provider, key, model=None, base_url=None):
     provider = (provider or "gemini").lower()
     if provider == "gemini":
         name = model if (model or "").startswith("models/") else (f"models/{model}" if model else pick_gemini_model(key))
-        data = _http_json(f"https://generativelanguage.googleapis.com/v1beta/{name}:generateContent",
-                          {"systemInstruction": {"parts": [{"text": SYSTEM_RULES}]},
-                           "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-                           "generationConfig": {"temperature": 0.4, "responseMimeType": "application/json"}},
-                          headers={"x-goog-api-key": key})
+        gen = {"temperature": 0.4, "responseMimeType": "application/json", "maxOutputTokens": 8192}
+        think = _thinking_config(name)
+        if think:
+            gen["thinkingConfig"] = think
+        payload = {"systemInstruction": {"parts": [{"text": SYSTEM_RULES}]},
+                   "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+                   "generationConfig": gen}
         try:
-            text = "".join(p.get("text", "") for p in data["candidates"][0]["content"]["parts"])
-        except (KeyError, IndexError):
-            raise AIError(f"Gemini returned no text: {str(data)[:200]}")
+            text = _gemini_stream(name, payload, key)
+        except AIError as e:
+            if think and "HTTP 400" in str(e) and "thinking" in str(e).lower():
+                gen.pop("thinkingConfig")       # this model doesn't accept the setting; try plain
+                text = _gemini_stream(name, payload, key)
+            else:
+                raise
         return text, name.replace("models/", "")
     if provider == "anthropic":
         model = model or "claude-sonnet-5-5"
@@ -445,6 +509,8 @@ def annotate(game, my_color, facts, ai=None):
             info["ai_used"] = model_used
         except AIError as e:
             info["ai_error"] = str(e)
+        except Exception as e:   # never lose the engine analysis because of the AI step
+            info["ai_error"] = f"AI step failed ({type(e).__name__}). Engine notes were used instead."
 
     if not summary:
         summary = auto_summary(facts, my_color)
