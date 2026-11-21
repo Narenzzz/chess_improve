@@ -207,7 +207,7 @@ with tab_a:
             facts = an.analyse_game(game, color, depth=depth, threads=2, hash_mb=128,
                                     progress=lambda i, n: bar.progress(i / n, text=f"Engine: move {i} of {n}"))
             bar.progress(1.0, text="Writing the notes…" if ai_key else "Building notes…")
-            with st.spinner("Writing coach notes…" if ai_key else "Building notes…"):
+            with st.spinner("Writing coach notes… (can take a minute or two)" if ai_key else "Building notes…"):
                 result = an.annotate(game, color, facts, ai=ai_cfg if ai_key else None)
             bar.empty()
             h = game.headers
@@ -215,7 +215,7 @@ with tab_a:
                 "result": result, "facts": facts, "color": color,
                 "title": f"{h.get('White', '?')} vs {h.get('Black', '?')} ({h.get('Result', '?')})",
                 "name": f"{h.get('White', '?')} - {h.get('Black', '?')} {h.get('Date', h.get('UTCDate', ''))}".strip(),
-                "study_url": None,
+                "study_url": None, "pgn_src": pgn_text,
             }
         except an.AnnotateError as e:
             st.error(str(e))
@@ -229,6 +229,12 @@ with tab_a:
         st.subheader(ann["title"])
         if info.get("ai_error"):
             st.warning(info["ai_error"])
+            if ai_key and st.button("Write AI notes again", width="stretch", key="ann_retry"):
+                with st.spinner("Writing coach notes… (can take a minute or two)"):
+                    g2 = an.parse_pgn(ann["pgn_src"])
+                    ann["result"] = an.annotate(g2, color, facts, ai=ai_cfg)
+                    ann["study_url"] = None
+                st.rerun()
         if info.get("ai_used"):
             removed = f" {info['dropped']} sentence(s) mentioning unverified moves were removed." if info["dropped"] else ""
             st.caption(f"Notes: {info['ai_used']} · Engine: Stockfish depth {facts['depth']}.{removed}")
