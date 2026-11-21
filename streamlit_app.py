@@ -1,4 +1,4 @@
-"""Streamlit front end for chess_coach.py. Deploy on Streamlit Community Cloud with these files in the repo root: streamlit_app.py (this file, set it as the app's main file) chess_coach.py requirements.txt (chess, streamlit) packages.txt (stockfish) """
+"""Streamlit front end for chess_coach.py. Deploy on Streamlit Community Cloud with these files in the repo root: streamlit_app.py (this file, set it as the app's main file) chess_coach.py annotator.py requirements.txt (chess, streamlit) packages.txt (stockfish) """
 import argparse
 import csv
 import datetime as dt
@@ -9,6 +9,7 @@ import re
 
 import streamlit as st
 
+import annotator as an
 import chess_coach as cc
 
 st.set_page_config(page_title="Chess Coach", page_icon="♟", layout="wide")
@@ -36,6 +37,13 @@ def show_html(page, height):
     else:  # older Streamlit
         import streamlit.components.v1 as components
         components.html(page, height=height, scrolling=True)
+
+
+def secret(name, default=""):
+    try:
+        return st.secrets.get(name, default) or default
+    except Exception:
+        return default
 
 
 def run_report(user, speeds):
@@ -160,16 +168,119 @@ if os.path.exists(cc.CACHE_FILE) and not go and not theory_go:
 report = read(os.path.join(cc.DATA_DIR, "report.html"))
 
 # ------------------------------------------------------------------ main area
-st.title(f"Chess Coach: {user}")
-if not report:
-    st.info("No analysis yet. Click **Fetch & analyse new games** in the sidebar, "
-            "or restore a backup in the **Backup** tab.")
+st.title("♟ Chess Coach")
 
-tab_r, tab_t, tab_p, tab_l, tab_b = st.tabs(["Report", "Critical or normal?", "Puzzles", "Training log", "Backup"])
+tab_a, tab_r, tab_t, tab_p, tab_l, tab_b = st.tabs(
+    ["Annotate", "Report", "Critical or normal?", "Puzzles", "Training log", "Backup"])
+
+# ------------------------------------------------------------------ annotate one game
+ICON = {"blunder": "🔴", "mistake": "🟠", "inaccuracy": "🟡"}
+
+with tab_a:
+    ai_key = secret("GEMINI_API_KEY") or secret("AI_API_KEY")
+    ai_cfg = {"provider": secret("AI_PROVIDER", "gemini"), "key": ai_key,
+              "model": secret("AI_MODEL") or None, "base_url": secret("AI_BASE_URL") or None}
+    my_names = [x for x in re.split(r"[,\s]+", secret("MY_USERNAMES", f"{user},naren94")) if x]
+
+    pgn_text = st.text_area("Paste your game PGN", height=140, key="ann_pgn",
+                            placeholder='[Event "..."]\n1. e4 c5 2. Nf3 ...',
+                            help="chess.com app: open the game → Share → PGN → Copy. Lichess: game → Share & export → PGN.")
+    c1, c2 = st.columns(2)
+    side = c1.selectbox("You played", ["Auto-detect", "White", "Black"])
+    depth_label = c2.selectbox("Engine depth", ["Fast (12)", "Normal (14)", "Deep (16)"], index=1,
+                               help="Normal takes about 1–3 minutes on the free server.")
+    if ai_key:
+        st.caption(f"Explanations by AI ({ai_cfg['provider']}); every move it mentions is checked against Stockfish.")
+    else:
+        st.caption("No AI key set: you'll get engine-based notes. Add GEMINI_API_KEY in the app's Secrets for coach-style explanations.")
+
+    if st.button("Annotate", type="primary", width="stretch", key="ann_go"):
+        try:
+            game = an.parse_pgn(pgn_text)
+            color = {"White": True, "Black": False}.get(side)
+            if color is None:
+                color = an.detect_color(game, my_names)
+            if color is None:
+                raise an.AnnotateError("Couldn't tell which side you played. Choose White or Black above.")
+            depth = int(re.search(r"\d+", depth_label).group())
+            bar = st.progress(0.0, text="Starting Stockfish…")
+            facts = an.analyse_game(game, color, depth=depth, threads=2, hash_mb=128,
+                                    progress=lambda i, n: bar.progress(i / n, text=f"Engine: move {i} of {n}"))
+            bar.progress(1.0, text="Writing the notes…" if ai_key else "Building notes…")
+            with st.spinner("Writing coach notes…" if ai_key else "Building notes…"):
+                result = an.annotate(game, color, facts, ai=ai_cfg if ai_key else None)
+            bar.empty()
+            h = game.headers
+            st.session_state["ann"] = {
+                "result": result, "facts": facts, "color": color,
+                "title": f"{h.get('White', '?')} vs {h.get('Black', '?')} ({h.get('Result', '?')})",
+                "name": f"{h.get('White', '?')} - {h.get('Black', '?')} {h.get('Date', h.get('UTCDate', ''))}".strip(),
+                "study_url": None,
+            }
+        except an.AnnotateError as e:
+            st.error(str(e))
+        except SystemExit as e:
+            st.error(str(e))
+
+    ann = st.session_state.get("ann")
+    if ann:
+        res, facts, color = ann["result"], ann["facts"], ann["color"]
+        info = res["info"]
+        st.subheader(ann["title"])
+        if info.get("ai_error"):
+            st.warning(info["ai_error"])
+        if info.get("ai_used"):
+            removed = f" {info['dropped']} sentence(s) mentioning unverified moves were removed." if info["dropped"] else ""
+            st.caption(f"Notes: {info['ai_used']} · Engine: Stockfish depth {facts['depth']}.{removed}")
+        st.info(res["summary"])
+        if res["lessons"]:
+            st.markdown("**Lessons**\n" + "\n".join(f"{i}. {l}" for i, l in enumerate(res["lessons"], 1)))
+
+        evals = [max(-6.0, min(6.0, p["eval_after"] / 100)) for p in facts["plies"]]
+        st.line_chart({"Evaluation (White)": evals}, height=180, x_label="half-move", y_label="pawns")
+
+        st.markdown("**Key moments**")
+        for m in res["moments"]:
+            icon = ICON.get(m["tag"], "🟢" if m["mine"] else "⚪")
+            with st.expander(f"{icon} {an.move_label(m)} · {m['kind']}"):
+                st.markdown(an.svg_img_tag(an.board_svg(m, color)), unsafe_allow_html=True)
+                st.caption("Red arrow: move played · Green arrow: engine's best")
+                st.write(res["notes"].get(m["id"], ""))
+                if m["best_san"] != m["san"]:
+                    st.caption(f"Engine line: {m['best_line']}")
+                if m["spent"] is not None:
+                    st.caption(f"Time used: {an.fmt_time(m['spent'])} · clock left {an.fmt_time(m['clock'])}")
+
+        st.markdown("**Save it**")
+        st.download_button("Download annotated PGN", res["pgn"], file_name="annotated.pgn",
+                           mime="application/x-chess-pgn", width="stretch")
+        with st.expander("Copy PGN"):
+            st.code(res["pgn"], language=None, wrap_lines=True)
+
+        study = secret("LICHESS_STUDY")
+        if not study:
+            study = st.text_input("Your Lichess study link (optional)", key="ann_study",
+                                  help="Create a study on Lichess once, e.g. 'My annotated games', and paste its link. "
+                                       "Add LICHESS_STUDY to Secrets to skip this.")
+        if token and study:
+            if st.button("Add to my Lichess study", width="stretch", key="ann_send"):
+                try:
+                    ann["study_url"] = an.send_to_study(token, study, res["pgn"], ann["name"],
+                                                        "white" if color else "black")
+                except an.AnnotateError as e:
+                    st.error(str(e))
+            if ann.get("study_url"):
+                st.success("Added as a new chapter.")
+                st.link_button("Open in Lichess", ann["study_url"], width="stretch")
+        elif study and not token:
+            st.caption("To send it to your study, add your Lichess token (with study write permission) in Secrets.")
 
 with tab_r:
     if report:
         show_html(report, 3600)
+    else:
+        st.info("No analysis yet. Open the sidebar (› at the top left on mobile) and tap "
+                "**Fetch & analyse new games**, or restore a backup in the **Backup** tab.")
 
 with tab_t:
     trainer = read(os.path.join(cc.DATA_DIR, "trainer.html"))
